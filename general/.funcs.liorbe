@@ -1,0 +1,81 @@
+#!/bin/bash
+
+function mytool()
+{
+    [[ "$1" =~ "-dry" ]] && { dryr="echo "; shift; }
+    local cmd="/home/sw/ad/tools/src/sw-dev/tools/scripts/$@"
+    ${dryr}$cmd
+
+    unset dryr
+}
+
+function fany()
+{
+	if [[ ! -z $2 ]]; then
+		param="-type ${2#-}"
+	fi
+	find . $param -iname "*$1*" -exec readlink -f {} + ;
+
+    unset param
+}
+
+function tar_untracked()
+{
+    local _outfile="${1:-untracked.tar}"
+
+    # Collect untracked files into an array
+    _untracked=()
+    while IFS= read -r -d '' file; do
+        _untracked+=("$file")
+    done < <(git ls-files --others --exclude-standard -z)
+
+    # If nothing found
+    if (( ${#_untracked[@]} == 0 )); then
+        echo "No untracked files"
+        exit 0
+    fi
+
+    # Create tar from the list
+    printf '%s\0' "${_untracked[@]}" | tar --null -T - -cvf ${_outfile}
+
+    for file in "${_untracked[@]}"; do
+        [[ -z "$file" ]] && continue   # skip the trailing empty element
+        rm $file
+    done
+
+    echo outfile: ${_outfile}
+
+    unset untracked
+    unset file
+    unset _outfile
+}
+
+function untar()
+{
+    [[ "$1" == "-dry" ]] && { local dryr="echo -e "; shift; }
+    local _infile="$1"
+    local _outdir="$2"
+
+    [[ ! -z ${_outdir} ]] && local _postfix="-C ${_outdir}"
+
+    ${dryr}tar -xvf ${_infile} ${_postfix}
+}
+
+function count
+{
+    local string_to_count="$1"
+
+    LC_ALL=C grep -RInF --binary-files=without-match --exclude-dir=.git "$string_to_count" . \
+    | awk -F: '{
+        line_number = $2
+        file_name   = $1
+        counts[file_name]++
+        lines[file_name] = (lines[file_name] ? lines[file_name] " " line_number : line_number)
+    }
+    END {
+        for (file in counts) {
+            print file ":" counts[file] " [" lines[file] "]"
+        }
+    }' | sort
+
+}
