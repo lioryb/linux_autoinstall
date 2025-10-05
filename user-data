@@ -1,0 +1,290 @@
+# ======================================================================
+# Ubuntu 24.04 LTS Autoinstall for Oracle VirtualBox
+# - BIOS boot (GPT with bios_grub)
+# - Custom partitions, users, packages, repos, and desktop tweaks
+# - Includes inline documentation via comments
+# ======================================================================
+
+#cloud-config
+autoinstall:
+  version: 1
+
+  locale: en_US.UTF-8
+  timezone: Asia/Jerusalem
+  keyboard:
+    layout: us
+
+  identity:
+    hostname: SW-DevEnv
+    username: sw
+    # SHA-512 for: retym@Work2020
+    password: "$6$KFbU1onVkTHBiXpD$AkF79uvSNBnPtrhY6rO2Na2OJ3OpgLrhqvbLVizJXjKPy4RdwTWkVZ7cLmJajr9cxqKKItcg6I1p8FlTIGEvS/"
+
+  # Enable root and set its password via embedded cloud-init
+  user-data:
+    users:
+      - name: root
+        lock_passwd: false
+        # SHA-512 for: sw@retym
+        passwd: "$6$EJ0bYFns9iNFr7M8$abvquzpJICQjIyZIejfkYUL/xvLaF.PCGlWbu7wZbfRsQXKRD2U.Hk6AzbQampBeEF9IhTK9VhBSaqxDfEm99/"
+        shell: /bin/bash
+
+  network:
+    version: 2
+    renderer: networkd
+    ethernets:
+      default:
+        match:
+          name: "e*"
+        dhcp4: true
+        dhcp6: false
+
+  packages:
+    - ubuntu-desktop            # full GNOME desktop
+    - virtualbox-guest-utils
+    - virtualbox-guest-x11      # keep if you want auto-resize/clipboard in GUI
+    - virtualbox-guest-dkms
+    - linux-headers-generic
+    - build-essential
+    - dkms
+    - net-tools
+    - openssh-server
+    - gcc
+    - mingw-w64
+    - gcc-aarch64-linux-gnu
+    - git
+    - samba
+
+  storage:
+    config:
+      - id: disk-sda
+        type: disk
+        ptable: gpt
+        wipe: superblock
+        preserve: false
+        grub_device: true
+        match:
+          path: /dev/sda
+
+      # 1) bios_grub
+      - id: part-biosgrub
+        type: partition
+        device: disk-sda
+        size: 1M
+        flag: bios_grub
+
+      # 2) /boot (4G, ext4)
+      - id: part-boot
+        type: partition
+        device: disk-sda
+        size: 4096M
+      - id: fs-boot
+        type: format
+        fstype: ext4
+        volume: part-boot
+      - id: mp-boot
+        type: mount
+        device: fs-boot
+        path: /boot
+
+      # 3) /opt (32G, ext4)
+      - id: part-opt
+        type: partition
+        device: disk-sda
+        size: 32768M
+      - id: fs-opt
+        type: format
+        fstype: ext4
+        volume: part-opt
+      - id: mp-opt
+        type: mount
+        device: fs-opt
+        path: /opt
+
+      # 4) swap (8G)
+      - id: part-swap
+        type: partition
+        device: disk-sda
+        size: 8192M
+      - id: fs-swap
+        type: format
+        fstype: swap
+        volume: part-swap
+
+      # 5) /usr (48G, ext4)
+      - id: part-usr
+        type: partition
+        device: disk-sda
+        size: 49152M
+      - id: fs-usr
+        type: format
+        fstype: ext4
+        volume: part-usr
+      - id: mp-usr
+        type: mount
+        device: fs-usr
+        path: /usr
+
+      # 6) /var (16G, xfs)
+      - id: part-var
+        type: partition
+        device: disk-sda
+        size: 16384M
+      - id: fs-var
+        type: format
+        fstype: xfs
+        volume: part-var
+      - id: mp-var
+        type: mount
+        device: fs-var
+        path: /var
+
+      # 7) /home (64G, ext4)
+      - id: part-home
+        type: partition
+        device: disk-sda
+        size: 65536M
+      - id: fs-home
+        type: format
+        fstype: ext4
+        volume: part-home
+      - id: mp-home
+        type: mount
+        device: fs-home
+        path: /home
+
+      # 8) / (grow to fill)
+      - id: part-root
+        type: partition
+        device: disk-sda
+        size: 1024M
+        grow: true
+        max: 100%
+      - id: fs-root
+        type: format
+        fstype: ext4
+        volume: part-root
+      - id: mp-root
+        type: mount
+        device: fs-root
+        path: /
+
+  late-commands:
+    # 1) Resolve VB_USER / VB_NAME and rename user if needed
+    - |
+      curtin in-target --target=/target -- bash -eux <<'BASH'
+      get_gp() { /usr/bin/VBoxControl guestproperty get "$1" 2>/dev/null | awk '{print $2}'; }
+      VB_USER="$(get_gp /VB_USER || true)"; [ -z "$VB_USER" ] || [ "$VB_USER" = "No" ] && VB_USER="sw"
+      VB_NAME="$(get_gp /VB_NAME || true)"; [ -z "$VB_NAME" ] || [ "$VB_NAME" = "No" ] && VB_NAME="sw"
+
+      CUR_USER="sw"
+      if [ "$VB_USER" != "$CUR_USER" ] && id -u "$CUR_USER" >/dev/null 2>&1; then
+        getent group "$VB_USER" >/dev/null || groupmod -n "$VB_USER" "$CUR_USER"
+        id -u "$VB_USER" >/dev/null 2>&1 || usermod -l "$VB_USER" "$CUR_USER"
+        OLDDIR="/home/$CUR_USER"; NEWDIR="/home/$VB_USER"
+        [ -d "$OLDDIR" ] && [ ! -e "$NEWDIR" ] && usermod -m -d "$NEWDIR" "$VB_USER"
+      fi
+
+      chfn -f "$VB_NAME" "$VB_USER"
+      usermod -aG sudo "$VB_USER"
+      chsh -s /bin/bash "$VB_USER"
+      BASH
+
+    # 2) Repos + install Chrome, Edge, Beyond Compare
+    - |
+      curtin in-target --target=/target -- bash -eux <<'BASH'
+      install -d -m 0755 /usr/share/keyrings /etc/apt/sources.list.d
+
+      curl -fsSL https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-linux-signing-keyring.gpg
+      echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-linux-signing-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+
+      curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg
+      echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/edge stable main" > /etc/apt/sources.list.d/microsoft-edge.list
+
+      curl -fsSL https://www.scootersoftware.com/RPM-GPG-KEY-scootersoftware-public | gpg --dearmor -o /usr/share/keyrings/bcompare.gpg
+      echo "deb [arch=amd64 signed-by=/usr/share/keyrings/bcompare.gpg] https://www.scootersoftware.com/ bcompare5 non-free" > /etc/apt/sources.list.d/bcompare.list
+
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y google-chrome-stable microsoft-edge-stable bcompare
+      BASH
+
+    # 3) GDM autologin
+    - |
+      curtin in-target --target=/target -- bash -eux <<'BASH'
+      FINAL_USER="$(getent passwd sw >/dev/null 2>&1 && echo sw || true)"
+      [ -n "$FINAL_USER" ] || FINAL_USER="$(awk -F: '$3>=1000 && $3<65534 {print $1; exit}' /etc/passwd)"
+
+      conf=/etc/gdm3/custom.conf
+      mkdir -p /etc/gdm3
+      touch "$conf"
+      grep -q '^\[daemon\]' "$conf" || printf "[daemon]\n" >> "$conf"
+      sed -i "s/^#\?AutomaticLoginEnable=.*/AutomaticLoginEnable=true/g" "$conf" || true
+      sed -i "s/^#\?AutomaticLogin=.*/AutomaticLogin=${FINAL_USER}/g" "$conf" || echo "AutomaticLogin=${FINAL_USER}" >> "$conf"
+
+      mkdir -p /var/lib/AccountsService/users
+      {
+        echo "[User]"
+        echo "XSession=gnome"
+        echo "SystemAccount=false"
+      } > "/var/lib/AccountsService/users/${FINAL_USER}"
+      BASH
+
+    # 4) dconf policies: disable lock screen + pin Terminal
+    - |
+      curtin in-target --target=/target -- bash -eux <<'BASH'
+      install -d -m 0755 /etc/dconf/db/local.d /etc/dconf/profile
+      cat >/etc/dconf/db/local.d/00-lock-and-favorites <<'EOF'
+      [org/gnome/desktop/screensaver]
+      lock-enabled=false
+      ubuntu-lock-on-suspend=false
+
+      [org/gnome/desktop/lockdown]
+      disable-lock-screen=true
+
+      [org/gnome/shell]
+      favorite-apps=["org.gnome.Terminal.desktop","org.gnome.Nautilus.desktop","firefox.desktop"]
+      EOF
+      printf "user-db:user\nsystem-db:local\n" > /etc/dconf/profile/user
+      dconf update
+      BASH
+
+    # 5) /opt/devenv + user dotfiles sourcing
+    - |
+      curtin in-target --target=/target -- bash -eux <<'BASH'
+      FINAL_USER="$(getent passwd sw >/dev/null 2>&1 && echo sw || true)"
+      [ -n "$FINAL_USER" ] || FINAL_USER="$(awk -F: '$3>=1000 && $3<65534 {print $1; exit}' /etc/passwd)"
+      FINAL_HOME="$(getent passwd "$FINAL_USER" | cut -d: -f6)"
+
+      install -d -m 0755 /opt/devenv
+      chown "$FINAL_USER:$FINAL_USER" /opt/devenv
+      for f in /opt/devenv/.bashrc.devenv /opt/devenv/.aliases.devenv; do
+        [ -f "$f" ] || { echo "# placeholder: $f" > "$f"; chmod 0755 "$f"; }
+      done
+      chown "$FINAL_USER:$FINAL_USER" /opt/devenv/.bashrc.devenv /opt/devenv/.aliases.devenv
+
+      install -d -m 0755 "$FINAL_HOME/.${FINAL_USER}"
+      for f in ".bashrc.${FINAL_USER}" ".aliases.${FINAL_USER}"; do
+        [ -f "$FINAL_HOME/.${FINAL_USER}/$f" ] || echo "# placeholder" > "$FINAL_HOME/.${FINAL_USER}/$f"
+      done
+      chown -R "$FINAL_USER:$FINAL_USER" "$FINAL_HOME/.${FINAL_USER}"
+
+      add_sources() {
+        local rc="$1" usernm="$2"
+        [ -f "$rc" ] || touch "$rc"
+        grep -q '/opt/devenv/.bashrc.devenv' "$rc" || echo 'source "/opt/devenv/.bashrc.devenv"' >> "$rc"
+        grep -q '/opt/devenv/.aliases.devenv' "$rc" || echo 'source "/opt/devenv/.aliases.devenv"' >> "$rc"
+        grep -q "\$HOME/.${usernm}/.bashrc.${usernm}" "$rc" || echo "source \"\$HOME/.${usernm}/.bashrc.${usernm}\"" >> "$rc"
+        grep -q "\$HOME/.${usernm}/.aliases.${usernm}" "$rc" || echo "source \"\$HOME/.${usernm}/.aliases.${usernm}\"" >> "$rc"
+      }
+      add_sources "$FINAL_HOME/.bashrc" "$FINAL_USER"
+      BASH
+
+    # 6) Enable SSH + optional upgrades
+    - |
+      curtin in-target --target=/target -- bash -eux <<'BASH'
+      systemctl enable ssh || true
+      systemctl restart ssh || true
+      DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade || true
+      apt-get -y autoremove || true
+      apt-get -y clean || true
+      BASH
